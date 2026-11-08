@@ -1,0 +1,373 @@
+diff --git a/dualsense_pad/output.py b/dualsense_pad/output.py
+index afb3ab0..c34638c 100644
+--- a/dualsense_pad/output.py
++++ b/dualsense_pad/output.py
+@@ -33,6 +33,7 @@ USB 连接下的输出报文是 **report id 0x02、48 字节**。关键偏移：
+ 
+ from __future__ import annotations
+ 
++import os
+ import threading
+ import time
+ from typing import Iterable
+@@ -46,6 +47,15 @@ REPORT_ID = 0x02
+ #: 使能位 1：同时允许改左右马达
+ ENABLE_1_MOTORS = 0x03
+ 
++#: 使能位 1：同时允许改左右扳机效果
++ENABLE_1_TRIGGERS = 0x0C
++
++#: 右扳机效果（11 字节）在报文里的偏移
++TRIGGER_RIGHT_OFFSET = 11
++
++#: 左扳机效果（11 字节）在报文里的偏移
++TRIGGER_LEFT_OFFSET = 22
++
+ #: 使能位 2：允许改灯条颜色
+ ENABLE_2_LIGHTBAR = 0x04
+ 
+@@ -64,6 +74,7 @@ def build_report(
+     rgb: Rgb | None = None,
+     *,
+     reset_lightbar: bool = False,
++    triggers: tuple[bytes, bytes] | None = None,
+ ) -> bytes:
+     """构造一帧 48 字节输出报文。
+ 
+@@ -95,9 +106,41 @@ def build_report(
+         report[LIGHTBAR_OFFSET + 0] = _clamp8(rgb[0])
+         report[LIGHTBAR_OFFSET + 1] = _clamp8(rgb[1])
+         report[LIGHTBAR_OFFSET + 2] = _clamp8(rgb[2])
++    # 扳机效果：每帧都要带上，否则一次震动/换灯就把阻力清掉了。
++    # **全 0 也要发**：不设 flags 的话手柄会保持原来的效果，
++    # 「清除」就永远清不掉（2026-11-08 实测：发了 off 但手上阻力还在）。
++    if triggers is not None:
++        left, right = triggers
++        report[TRIGGER_RIGHT_OFFSET : TRIGGER_RIGHT_OFFSET + 11] = _pad11(right)
++        report[TRIGGER_LEFT_OFFSET : TRIGGER_LEFT_OFFSET + 11] = _pad11(left)
++        report[1] |= ENABLE_1_TRIGGERS
+     return bytes(report)
+ 
+ 
++def ramp_effect(start_force: int, end_force: int) -> bytes:
++    """构造一个「随行程变重」的扳机效果（0x21 分区阻力 + 三段力度）。
++
++    2026-11-08 实测确认：Resistance 帧的 ``[3][4][5]`` 是**按行程分三段的力度**，
++    76 / 127 / 178 的手感就是三成 → 五成 → 七成（用户确认「力度对的」）。
++    ``[1][2]`` 是哪些位置参与的位掩码，全开 = ``0xFF, 0x03``。
++    """
++    b = bytearray(11)
++    b[0] = 0x21
++    b[1] = 0xFF
++    b[2] = 0x03
++    b[3] = _clamp8(start_force)
++    b[4] = _clamp8((int(start_force) + int(end_force)) // 2)
++    b[5] = _clamp8(end_force)
++    return bytes(b)
++
++
++def _pad11(value: bytes) -> bytes:
++    """把扳机效果补齐到 11 字节。"""
++    b = bytearray(11)
++    b[: min(11, len(value))] = value[:11]
++    return bytes(b)
++
++
+ def _clamp8(value: int) -> int:
+     """截到 0..255。
+ 
+@@ -107,6 +150,22 @@ def _clamp8(value: int) -> int:
+     return max(0, min(255, int(value)))
+ 
+ 
++_DEBUG_LOG = os.path.join(
++    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "write-debug.log"
++)
++
++
++def _debug(msg: str) -> None:
++    """把写入通道的异常与脉冲请求记到文件（服务跑在隐藏窗口里，print 看不到）。"""
++    try:
++        if os.path.exists(_DEBUG_LOG) and os.path.getsize(_DEBUG_LOG) > 400_000:
++            os.replace(_DEBUG_LOG, _DEBUG_LOG + ".old")
++        with open(_DEBUG_LOG, "a", encoding="utf-8") as f:
++            f.write(time.strftime("%H:%M:%S") + " " + msg + "\n")
++    except Exception:
++        pass
++
++
+ class Pattern:
+     """断续震动模式：固定振幅，靠"通电时间占比"表达强弱。
+ 
+@@ -154,7 +213,7 @@ class Haptics:
+        不同手柄个体差异不小，让用户自己调比在代码里写死一个数靠谱。
+     """
+ 
+-    def __init__(self, writer, *, tick: float = 0.004, idle_rgb: Rgb = (12, 26, 52)):
++    def __init__(self, writer, *, tick: float = 0.016, idle_rgb: Rgb = (12, 26, 52)):
+         self._writer = writer
+         self._lock = threading.Lock()
+         self._tick = tick
+@@ -168,6 +227,9 @@ class Haptics:
+         self._idle_rgb = idle_rgb
+         self._last_sent: tuple | None = None
+ 
++        # 扳机效果 (left, right)：留在状态里，每帧都带上，否则一震动就被清
++        self._trig: tuple[bytes, bytes] = (bytes(11), bytes(11))
++
+         self.gain = 1.0
+ 
+         # 只读的观测值，方便 /state 暴露出去做调试
+@@ -187,6 +249,7 @@ class Haptics:
+             self._weak = int(weak * scale)
+             self._strong = int(strong * scale)
+             self._until = time.monotonic() + ms / 1000.0
++        _debug("pulse req w=%d s=%d ms=%d (scaled %d/%d)" % (weak, strong, ms, self._weak, self._strong))
+         return True
+ 
+     def pattern(self, period: float, duty: float, weak: int, strong: int, hold: float) -> None:
+@@ -210,7 +273,16 @@ class Haptics:
+ 
+         速度用**时间域**表达：慢速时通电占比低（细颤），快速时铺满（连续）。
+         振幅本身只在高端轻微上扬，因为低段差异几乎摸不出来。
++
++        .. note::
++
++           如果刚发过 :meth:`pulse`（``_until`` 还没到期），这里必须让路：
++           手指还搭在板上时，采样循环每 80ms 调一次 ``live()``，速度低于阈值
++           就 ``stop()``，会把刚写进去的回手震动立刻清掉 —— 表现为「震动只有
++           一下，后面全没有」。
+         """
++        if time.monotonic() < self._until:
++            return
+         if speed_mm_s < 25.0:
+             self.stop()
+             return
+@@ -249,6 +321,34 @@ class Haptics:
+         """回到待机色。"""
+         self.light(self._idle_rgb)
+ 
++    def trigger_ramp(
++        self,
++        start_force: int | None,
++        end_force: int = 0,
++        *,
++        left: bool = True,
++        right: bool = True,
++    ) -> None:
++        """设置扳机阻力：从 ``start_force`` 随行程升到 ``end_force``（0-255）。
++
++        传 ``start_force=None`` 表示清除扳机效果。状态存在 :class:`Haptics`
++        里，刷新线程每一帧都会带上 —— 否则下一次震动/换灯就会把阻力清掉。
++        """
++        with self._lock:
++            if start_force is None:
++                self._trig = (bytes(11), bytes(11))
++                # 强制下一拍写一帧：状态可能本来就是全 0，不变就不会写，
++                # 手柄上残留的旧效果也就永远清不掉。
++                self._last_sent = None
++                return
++            eff = ramp_effect(start_force, end_force)
++            cur_left, cur_right = self._trig
++            self._trig = (
++                eff if left else cur_left,
++                eff if right else cur_right,
++            )
++        _debug("trigger ramp %s -> %s (L=%s R=%s)" % (start_force, end_force, left, right))
++
+     def release(self) -> None:
+         """放开写通道（进游戏前把设备让出去）。"""
+         self.stop()
+@@ -283,13 +383,31 @@ class Haptics:
+         return (self._weak, self._strong)
+ 
+     def _loop(self) -> None:
++        last_log = 0.0
+         while True:
+             weak, strong = self._current()
+             rgb = self._rgb
+-            state = (weak, strong, rgb)
++            trig = self._trig
++            state = (weak, strong, rgb, trig)
+             if state != self._last_sent:
+-                self._writer.write(build_report(weak, strong, rgb))
+-                self._last_sent = state
++                ok = self._writer.write(build_report(weak, strong, rgb, triggers=trig))
++                now = time.monotonic()
++                if ok:
++                    self._last_sent = state
++                    # 脉冲期间的写入一条不漏；live 的帧按 0.15s 节流，免得刷屏
++                    if (weak or strong) and (self._until > 0 or now - last_log > 0.15):
++                        last_log = now
++                        _debug(
++                            "write ok w=%d s=%d until=%.2f"
++                            % (weak, strong, max(0.0, self._until - now))
++                        )
++                else:
++                    # 写失败：不更新 _last_sent，下一拍重试；并尝试重开写通道
++                    _debug("write FAIL weak=%d strong=%d" % (weak, strong))
++                    try:
++                        self._writer.reopen()
++                    except Exception:
++                        pass
+             time.sleep(self._tick)
+ 
+ 
+diff --git a/dualsense_pad/server.py b/dualsense_pad/server.py
+index 38a866e..655b419 100644
+--- a/dualsense_pad/server.py
++++ b/dualsense_pad/server.py
+@@ -17,6 +17,7 @@
+ ``GET /gain?n=``       马达总强度倍率 0..2.5
+ ``GET /light?r=&g=&b=`` 直接设灯条颜色
+ ``GET /pulse?w=&s=&ms=`` 来一记震动
++``GET /trigger?start=&end=`` 设扳机阻力（随行程从 start 升到 end，0-255）；``off=1`` 清除
+ =====================  ====================================================
+ 
+ 所有端点都是 GET，返回 JSON，并且带 ``Access-Control-Allow-Origin: *`` ——
+@@ -45,6 +46,11 @@ from .report import edge_pressed, parse
+ 
+ DEFAULT_PORT = 7778
+ 
++#: 扳机当作"摸一下"的阈值：>= DOWN 算按下，<= UP 算松开。
++#: 两个阈值拉开一点，免得手抖在临界值上来回抖出好几段。
++TRIGGER_DOWN = 100
++TRIGGER_UP = 30
++
+ 
+ class Config:
+     """服务配置。所有"手感"参数都在这里，代码里不写死。"""
+@@ -126,6 +132,10 @@ class PadService:
+         self._running = False
+         self._takeover = True
+ 
++        #: 扳机按下时刻（None = 没按）。扣到底再松开算"一段摸"。
++        self._l2_down: float | None = None
++        self._r2_down: float | None = None
++
+         #: 按键回调。签名 ``(name: str) -> None``，默认只更新状态。
+         self.on_button: Callable[[str], None] | None = None
+ 
+@@ -235,6 +245,8 @@ class PadService:
+             point = data.touch1
+             now = time.monotonic()
+ 
++            self._handle_triggers(data.l2, data.r2, now)
++
+             if point.active:
+                 if not was_active:
+                     samples = []
+@@ -281,7 +293,8 @@ class PadService:
+                     with self._lock:
+                         self._state.update(active=False, two=False)
+                     try:
+-                        self.haptics.pulse(45, 25, 100)
++                        # 手指一抬就给一记即时回手，力度顶格（否则手抬起来后感觉不到）
++                        self.haptics.pulse(255, 138, 250)
+                     except Exception:
+                         pass
+                     self._collect(samples, gaps)
+@@ -293,6 +306,51 @@ class PadService:
+                 else:
+                     time.sleep(0.002)
+ 
++    def _handle_triggers(self, l2: int, r2: int, now: float) -> None:
++        """扣扳机 = 摸一下。
++
++        按下记起点，松开时按"按了多久"落定成一条触摸事件（手势记作 stroke）。
++        这样扳机和触摸板走同一条出口，插件不用为它单开代码。
++        """
++        for side, value, attr in (("左", l2, "_l2_down"), ("右", r2, "_r2_down")):
++            down = getattr(self, attr)
++            if down is None:
++                if value >= TRIGGER_DOWN:
++                    setattr(self, attr, now)
++                continue
++            if value > TRIGGER_UP:
++                continue
++            setattr(self, attr, None)
++            duration = max(0.0, now - down)
++            if duration < 0.05:
++                continue
++            event = {
++                "type": "touch",
++                "gesture": "stroke",
++                # 扣哪只手就记哪只手：左扳机 = 左手，右扳机 = 右手
++                "zone": "左手" if side == "左" else "右手",
++                "nx": 0.0,
++                "ny": 0.0,
++                "at": time.time(),
++                "dur": round(duration, 3),
++                "path": 0.0,
++                "speed": 0.0,
++                "span": 0.0,
++                "turns": 0.0,
++                "trigger": side,
++            }
++            with self._lock:
++                self._state.update(gesture="stroke", gestureAt=event["at"])
++            with self._events_lock:
++                self._events.append(event)
++                del self._events[: -self.config.event_buffer]
++            print("[pad] 扳机%s %.1fs" % (side, duration), flush=True)
++            try:
++                apply_reaction(self.haptics, "stroke")
++            except Exception as exc:
++                print("[pad] 反馈失败：%s" % exc, flush=True)
++            self._dispatch(event)
++
+     def _handle_buttons(self, buttons, previous):
+         names = edge_pressed(previous, buttons)
+         for name in names:
+@@ -301,9 +359,9 @@ class PadService:
+                     btn=name, btnSeq=self._state["btnSeq"] + 1
+                 )
+             event = {"type": "key", "name": name, "at": time.time()}
+-            with self._events_lock:
+-                self._events.append(event)
+-                del self._events[: -self.config.event_buffer]
++            # 按键不塞进 /events：那个流是"触摸动作"用的，混进去之后
++            # 消费方取最后一条会把按键当成一次 0.0 秒的触摸（gesture/dur 都没有）。
++            # 状态里仍然有 btn/btnSeq，webhook 也照旧推。
+             print("[pad] 按键 %s" % name, flush=True)
+             if self.on_button is not None:
+                 try:
+@@ -338,6 +396,14 @@ class PadService:
+                         data.touch2.x - point.x, data.touch2.y - point.y
+                     )
+                 )
++            # 等落定的这 2 秒里，手又摸回来也要给实时反馈，
++            # 否则「抬手再摸」这一段从头到尾没有震动
++            try:
++                self.haptics.live(
++                    speed_mm_s(samples, self.mapping.distance_mm, window=0.12)
++                )
++            except Exception:
++                pass
+             nx, ny = self.mapping.to_normalized(point.x, point.y)
+             with self._lock:
+                 self._state.update(
+@@ -505,6 +571,23 @@ def make_handler(service: PadService):
+                 self._json({"ok": True, "weak": weak, "strong": strong, "ms": ms})
+                 return
+ 
++            if path.startswith("/trigger"):
++                try:
++                    start = int((query.get("start") or ["76"])[0])
++                    end = int((query.get("end") or ["178"])[0])
++                except ValueError:
++                    start, end = 76, 178
++                raw_off = (query.get("off") or ["0"])[0].lower()
++                if raw_off in ("1", "true", "yes"):
++                    service.haptics.trigger_ramp(None)
++                    self._json({"ok": True, "trigger": "off"})
++                    return
++                start = max(0, min(255, start))
++                end = max(0, min(255, end))
++                service.haptics.trigger_ramp(start, end)
++                self._json({"ok": True, "start": start, "end": end})
++                return
++
+             self._json({"error": "not found"}, 404)
+ 
+     return Handler

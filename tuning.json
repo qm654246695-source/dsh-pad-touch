@@ -1,0 +1,13 @@
+{
+  "_comment": "改这里，下一秒生效，不用重启 DSH。autoOffMs=摸完多久关服务（5000=停 5 秒圈圈消失）；minIntervalMs=两条消息最小间隔；flushMs=停手多久把这一串触摸汇总成一条（2500）；hapticScale=震动强度倍率（0.3~2.5）；trigger=扳机阻力开关，triggerStart/triggerEnd=行程起点与终点力度（76→178 就是三成到七成）；light/haptic=灯条与震动开关；sessionId=探测不到时的兜底会话，平时留空，消息会跟着当前窗口走。",
+  "autoOffMs": 5000,
+  "minIntervalMs": 2000,
+  "hapticScale": 2.5,
+  "light": true,
+  "haptic": true,
+  "sessionId": "",
+  "trigger": true,
+  "triggerStart": 76,
+  "triggerEnd": 178,
+  "flushMs": 2500
+}

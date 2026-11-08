@@ -1,0 +1,41 @@
+{
+  "name": "dsh-pad-touch",
+  "version": "0.4.0",
+  "description": "把 PS5 手柄触摸板的动作变成一条会话消息：输入框边上一个按钮，点开才接收，空闲自动关；摸完亮灯、震动回手。依赖 dualsense-pad 的本地 7778 服务。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "dualsense",
+    "touchpad",
+    "haptic",
+    "ps5-controller",
+    "ai-companion"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "tuning.json",
+    "patches",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "license": "MIT"
+}

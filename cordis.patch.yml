@@ -1,0 +1,21 @@
+# dsh-pad-touch —— 把手柄触摸板接进会话
+#
+# 装：dsh plugin --profile desktop add "link:/path/to/dsh-pad-touch"
+# 关：把 enabled 改成 false，或用 plugin_manager set_plugin 关掉这一条。
+#
+# 下面三处必须按你的机器改：
+#   repoDir  —— dualsense-pad 仓库所在目录
+#   pyExe    —— 你的 python 解释器（要能 import dualsense_pad）
+#   sessionId—— 消息投进哪个会话；换窗口后要改这里（已知的笨办法，欢迎 PR）
+- insert:
+    - id: dsh-pad-touch
+      name: dsh-pad-touch
+      config:
+        enabled: true
+        padUrl: "http://127.0.0.1:7778"
+        repoDir: "/path/to/dualsense-pad"
+        pyExe: "python"
+        sessionId: "session-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        minIntervalMs: 2000
+        autoOffMs: 5000
+        light: true

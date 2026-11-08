@@ -1,0 +1,16 @@
+# 运行时产物，不进版本库
+*.log
+*.log.err
+*.bak
+*.bak-*
+*.prev-*
+write-debug.log
+pad-touch.log
+
+# 系统
+node_modules/
+.DS_Store
+Thumbs.db
+
+# 本地发布说明，不进仓库
+GITHUB.md
