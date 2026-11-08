@@ -111,6 +111,7 @@ dsh plugin --profile desktop add "link:/path/to/dsh-pad-touch"
 | `trigger` | 扳机阻力开关 | `false` 就不碰扳机 |
 | `triggerStart` / `triggerEnd` | 扳机行程起点 / 终点力度 | 0–255，默认 76→178（三成到七成） |
 | `light` / `haptic` | 灯条 / 震动开关 | — |
+| `userName` | 消息里怎么称呼你 | 留空就是「用户」；想让它叫名字就填这里 |
 
 `sessionId` 平时**留空**：插件会自己探当前窗口（见上面「会话跟随」），探测失败时才退回这个兜底值。
 

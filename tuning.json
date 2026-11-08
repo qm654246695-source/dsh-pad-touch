@@ -9,5 +9,6 @@
   "trigger": true,
   "triggerStart": 76,
   "triggerEnd": 178,
-  "flushMs": 2500
+  "flushMs": 2500,
+  "userName": ""
 }
